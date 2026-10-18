@@ -76,6 +76,11 @@ select{font:inherit;color:var(--cream);background:var(--panel-2);border:1px soli
       <label class="row" style="gap:6px"><input type="file" id="clipFile" accept="audio/*" hidden><button id="clipPick" type="button">Load or record clip</button></label>
       <button id="clipPlay" disabled>Play clip</button>
     </div>
+    <div class="row">
+      <label for="micSel" class="lbl">Mic</label>
+      <select id="micSel" style="flex:1 1 180px;min-width:0"><option value="">Default mic</option></select>
+      <button id="guard" aria-pressed="false">Feedback guard</button>
+    </div>
     <div class="sl"><div class="top"><label for="inGain">Input gain</label><output id="inGainV">1.5×</output></div><input type="range" id="inGain" min="0" max="4" step="0.05" value="1.5"></div>
     <div class="status" id="status">Tap Start audio, then allow the microphone.</div>
     <canvas id="viz" width="760" height="120" aria-label="Voice band levels and output waveform"></canvas>
@@ -118,13 +123,18 @@ select{font:inherit;color:var(--cream);background:var(--panel-2);border:1px soli
     <div class="sliders">
       <div class="sl"><div class="top"><label for="vol">Volume</label><output id="volV">80%</output></div><input type="range" id="vol" min="0" max="1.5" step="0.01" value="0.8"></div>
     </div>
+    <div class="row">
+      <label for="spkSel" class="lbl">Speaker</label>
+      <select id="spkSel" style="flex:1 1 180px;min-width:0"><option value="">Default speaker</option></select>
+      <button id="spkPick" hidden>Find speakers</button>
+    </div>
     <div class="rec">
       <button id="monitor" aria-pressed="true">Speaker on</button>
       <button id="recBtn" disabled><span class="dot" id="recDot"></span> Record</button>
       <audio id="recPlay" controls hidden></audio>
       <button id="recSave" hidden>Save recording</button>
     </div>
-    <div class="tip">Use headphones with the live mic. Mic plus speaker in the same room squeals with feedback, especially with Echo and Reverb up.</div>
+    <div class="tip">To stop squeal, send sound to a separate speaker (Bluetooth or wired) and keep the mic away from it. Feedback guard turns on the phone's echo cancelling, which helps when they share a room.</div>
   </section>
 </div>
 
@@ -336,10 +346,20 @@ async function useMic(){
   if(!ctx) return;
   if(clipNode) { try{ clipNode.disconnect(); }catch(e){} }
   if(micNode){ micNode.connect(A.input); say('Mic live. Use headphones to avoid feedback.'); return; }
+  await openMic();
+}
+let micId = '', guard = false;
+async function openMic(){
+  if(micStream) micStream.getTracks().forEach(t => t.stop());
+  if(micNode){ try{ micNode.disconnect(); }catch(e){} micNode = null; }
   try{
-    micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
-    micNode = ctx.createMediaStreamSource(micStream); micNode.connect(A.input);
-    say('Mic live. Use headphones to avoid feedback.');
+    const a = {echoCancellation:guard, noiseSuppression:guard, autoGainControl:false};
+    if(micId) a.deviceId = {exact:micId};
+    micStream = await navigator.mediaDevices.getUserMedia({audio:a});
+    micNode = ctx.createMediaStreamSource(micStream);
+    if(source==='mic') micNode.connect(A.input);
+    say(guard ? 'Mic live with Feedback guard on.' : 'Mic live. Keep it away from the speaker.');
+    listDevices();
   }catch(e){
     say('The microphone is blocked in this view. Load or record a voice clip instead, or open the app file in Chrome or Safari for live mic.', true);
     setSource('clip', true);
@@ -371,6 +391,51 @@ $('clipPlay').onclick = async () => {
   if(clipEl.paused){ await clipEl.play().catch(()=>{}); $('clipPlay').textContent='Pause clip'; }
   else { clipEl.pause(); $('clipPlay').textContent='Play clip'; }
 };
+
+/* ---------- Mic and speaker devices ---------- */
+async function listDevices(){
+  if(!navigator.mediaDevices?.enumerateDevices) return;
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  const fill = (sel, kind, def) => {
+    const keep = sel.value;
+    sel.innerHTML = `<option value="">${def}</option>`;
+    devs.filter(d => d.kind===kind && d.deviceId && d.deviceId!=='default').forEach((d,i) => {
+      const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || (kind==='audioinput'?'Mic ':'Speaker ')+(i+1); sel.appendChild(o);
+    });
+    if([...sel.options].some(o => o.value===keep)) sel.value = keep;
+  };
+  fill($('micSel'), 'audioinput', 'Default mic');
+  fill($('spkSel'), 'audiooutput', 'Default speaker');
+}
+async function setSpeaker(id){
+  if(!ctx) return;
+  try{
+    if(ctx.setSinkId){ await ctx.setSinkId(id || ''); }
+    else{
+      if(!A.outEl){ A.outDest = ctx.createMediaStreamDestination(); A.outEl = new Audio(); A.outEl.srcObject = A.outDest.stream; }
+      A.monitor.disconnect();
+      if(id){ A.monitor.connect(A.outDest); await A.outEl.setSinkId(id); await A.outEl.play(); }
+      else { A.monitor.connect(ctx.destination); A.outEl.pause(); }
+    }
+    say(id ? 'Sound going to ' + $('spkSel').selectedOptions[0].textContent + '.' : 'Sound going to the default speaker.');
+  }catch(e){ say('This browser cannot switch speakers. Pair the speaker as the phone default instead.', true); }
+}
+$('micSel').onchange = () => { micId = $('micSel').value; if(ctx && source==='mic') openMic(); };
+$('spkSel').onchange = () => setSpeaker($('spkSel').value);
+$('guard').onclick = () => { guard = !guard; $('guard').setAttribute('aria-pressed', guard); if(ctx && source==='mic') openMic(); };
+if(navigator.mediaDevices?.selectAudioOutput){
+  $('spkPick').hidden = false;
+  $('spkPick').onclick = async () => {
+    try{
+      const d = await navigator.mediaDevices.selectAudioOutput();
+      await listDevices();
+      if(![...$('spkSel').options].some(o => o.value===d.deviceId)){ const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || 'Picked speaker'; $('spkSel').appendChild(o); }
+      $('spkSel').value = d.deviceId; if(!ctx) await start(); setSpeaker(d.deviceId);
+    }catch(e){}
+  };
+}
+navigator.mediaDevices?.addEventListener?.('devicechange', listDevices);
+listDevices();
 
 /* ---------- Mode ---------- */
 function setMode(m){
@@ -566,6 +631,7 @@ async function start(){
     $('recBtn').disabled = false;
     if(!A.pitchOk) say('Pitch shifting is not supported in this browser. Other effects work.', true);
     setSource(source);
+    if($('spkSel').value) setSpeaker($('spkSel').value);
   })();
   return starting;
 }
